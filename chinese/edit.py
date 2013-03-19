@@ -21,34 +21,183 @@ import re
 from aqt import mw
 from anki.hooks import addHook
 
-import Chinese_support
-import edit_behavior
+import cache
+import cjklib.characterlookup
 
-# Focus lost hook
-##########################################################################
+SUFFIXES = ['Hanzi', 'Hanzi Colored', 'Pinyin', 'Pinyin Colored']
+STYLES = [
+    '',
+    'color: red;',
+    'color: blue;',
+    'color: green;',
+    'color: orange;',
+    'color: gray;',
+]
+HANZI_LOOKUP = cjklib.characterlookup.CharacterLookup('C')
 
-def on_focus_lost(flag, fields_data, focus_field):
-    field_names = mw.col.models.fieldNames(fields_data.model())
-    updated_field = field_names[focus_field]
-    efields = dict(fields_data) #user-edited fields
-    try:
-        model_type = fields_data.model()['addon']
-    except:
-        model_type = ""
-    model_name = fields_data.model()['name']
 
-    edit_behavior.update_fields(efields, updated_field, model_name, model_type)
+CONVERT_CACHE = cache.Empty(25)
+IS_CHARACTER_IN_DOMAIN_CACHE = cache.Empty(25)
+GET_READING_FOR_CHARACTER_CACHE = cache.Empty(25)
 
-    for k in field_names:
-        if efields[k] <> fields_data[k]:
-            fields_data[k] = efields[k]
-            flag = True
+
+
+@cache.caching(CONVERT_CACHE)
+def convert(*args, **kwargs):
+  return HANZI_LOOKUP._getReadingFactory().convert(*args, **kwargs)
+
+
+@cache.caching(IS_CHARACTER_IN_DOMAIN_CACHE)
+def isCharacterInDomain(*args, **kwargs):
+  return HANZI_LOOKUP.isCharacterInDomain(*args, **kwargs)
+
+
+@cache.caching(GET_READING_FOR_CHARACTER_CACHE)
+def getReadingForCharacter(*args, **kwargs):
+  return HANZI_LOOKUP.getReadingForCharacter(*args, **kwargs)
+
+
+def lookupField(note, fields, base, suffix):
+  if base:
+    name = '%s %s' % (base, suffix)
+  else:
+    name = suffix
+  if name in fields:
+    return (note[name], fields.index(name))
+  return (None, -1)
+
+
+def getPinyinFor(hanzi):
+  return getReadingForCharacter(
+      hanzi, 'Pinyin', toneMarkType='numbers')[0]
+
+
+def generatePinyin(hanzi):
+  pinyin = ''
+  for ch in hanzi:
+    if not isCharacterInDomain(ch):
+      colored_hanzi += ch
+      continue
+    pinyin += getPinyinFor(ch)
+  return pinyin
+
+
+def splitPinyin(pinyin, keep_spaces=False):
+  def splitPinyinRec(index):
+    if index >= len(pinyin): return []
+    start = index
+    while index < len(pinyin):
+      next = pinyin[index]
+      if next in ['1', '2', '3', '4', '5']:
+        return [pinyin[start:index + 1]] + splitPinyinRec(index + 1)
+      if not next.islower():
+        if keep_spaces:
+          if index == start:
+            return [next] + splitPinyinRec(index + 1)
+          else:
+            return [pinyin[start:index], next] + splitPinyinRec(index + 1)
+        else:
+          if index == start:
+            return splitPinyinRec(index + 1)
+          else:
+            return [pinyin[start:index]] + splitPinyinRec(index + 1)
+      index += 1
+    return [pinyin[start:]]
+  return splitPinyinRec(0)
+
+def coloredHanzi(hanzi, pinyin):
+  pinyin_list = splitPinyin(pinyin, keep_spaces=True)
+  pinyin_index = 0
+  colored_hanzi = ''
+  for ch in hanzi:
+    if not isCharacterInDomain(ch):
+      continue
+    while pinyin_index < len(pinyin_list):
+      p = pinyin_list[pinyin_index]
+      if not p[0].islower():
+        colored_hanzi += p
+        pinyin_index += 1
+      else:
+        break
+    if pinyin_index < len(pinyin_list):
+      p = pinyin_list[pinyin_index]
+      pinyin_index += 1
+      tone = p[-1] if p[-1] in ['1', '2', '3', '4', '5'] else '5'
+    else:
+      tone = 5
+    colored_hanzi += '<span style="%s">%s</span>' % (STYLES[int(tone)], ch)
+  return colored_hanzi
+
+
+def coloredPinyin(pinyin):
+  colored_pinyin = ''
+  for p in splitPinyin(pinyin, keep_spaces=True):
+    tone = p[-1] if p[-1] in ['1', '2', '3', '4', '5'] else '5'
+    if not p[0].islower():
+      colored_pinyin += p
+      continue
+    if p.endswith(tone):
+      p = p[:-1]
+    p = convert(
+        p + tone, 'Pinyin', 'Pinyin', sourceOptions={'toneMarkType': 'numbers'})
+    colored_pinyin += '<span style="%s">%s</span>' % (STYLES[int(tone)], p)
+  return colored_pinyin
+
+
+def setFieldByIndex(note, field_names, index, value):
+  note[field_names[index]] = value
+
+
+def editFocusLost(modified, note, focus_field_index):
+    field_names = mw.col.models.fieldNames(note.model())
+    focus_field_name = field_names[focus_field_index]
+    modified_note = dict(note)
+
+    base_name = None
+    for suffix in SUFFIXES:
+      if focus_field_name.endswith(suffix):
+        base_name = focus_field_name[:-len(suffix)-1]
+        break
+
+    if base_name is None:
+      return modified
+
+    (hanzi, hanzi_field_index) = lookupField(
+        note, field_names, base_name, SUFFIXES[0])
+    (hanzi_colored, hanzi_colored_field_index) = lookupField(
+        note, field_names, base_name, SUFFIXES[1])
+    (pinyin, pinyin_field_index) = lookupField(
+        note, field_names, base_name, SUFFIXES[2])
+    (pinyin_colored, pinyin_colored_field_index) = lookupField(
+        note, field_names, base_name, SUFFIXES[3])
+
+    if hanzi_field_index == focus_field_index and hanzi:
+      # User updated the hanzi.
+      if not pinyin:
+        # Generate if empty.
+        pinyin = generatePinyin(hanzi)
+      if pinyin_field_index != -1:
+        setFieldByIndex(modified_note, field_names, pinyin_field_index, pinyin)
+      if hanzi_colored_field_index != -1:
+        setFieldByIndex(modified_note, field_names, hanzi_colored_field_index,
+            coloredHanzi(hanzi, pinyin))
+      if pinyin_colored_field_index != -1:
+        setFieldByIndex(modified_note, field_names, pinyin_colored_field_index,
+            coloredPinyin(pinyin))
+    if pinyin_field_index == focus_field_index and pinyin:
+      if hanzi_colored_field_index != -1:
+        setFieldByIndex(modified_note, field_names, hanzi_colored_field_index,
+            coloredHanzi(hanzi, pinyin))
+      if pinyin_colored_field_index != -1:
+        setFieldByIndex(modified_note, field_names, pinyin_colored_field_index,
+            coloredPinyin(pinyin))
+
+    for field_name in field_names:
+        if modified_note[field_name] != note[field_name]:
+            note[field_name] = modified_note[field_name]
+            modified = True
     
-#    if flag:
-#        print "Left field ", updated_field, "(polluted)", efields[updated_field]
-#    else:
-#        print "Left field ", updated_field, "(clean)", efields[updated_field]
+    return modified
 
-    return flag
 
-addHook('editFocusLost', on_focus_lost)
+addHook('editFocusLost', editFocusLost)
