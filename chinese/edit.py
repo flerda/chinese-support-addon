@@ -76,7 +76,7 @@ def generatePinyin(hanzi):
   pinyin = ''
   for ch in hanzi:
     if not isCharacterInDomain(ch):
-      colored_hanzi += ch
+      pinyin += ch
       continue
     pinyin += getPinyinFor(ch)
   return pinyin
