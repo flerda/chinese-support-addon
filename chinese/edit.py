@@ -126,6 +126,13 @@ def coloredHanzi(hanzi, pinyin):
     else:
       tone = 5
     colored_hanzi += '<span style="%s">%s</span>' % (STYLES[int(tone)], ch)
+    while pinyin_index < len(pinyin_list):
+      p = pinyin_list[pinyin_index]
+      if not p[0].islower():
+        colored_hanzi += p
+        pinyin_index += 1
+      else:
+        break
   return colored_hanzi
 
 
